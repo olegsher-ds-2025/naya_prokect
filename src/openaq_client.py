@@ -1,9 +1,10 @@
-"""OpenAQ v3 API client with pagination, rate-limit handling, and retry."""
+"""OpenAQ v3 API client with thread-safe rate limiting, global backoff, and retry."""
 
 from __future__ import annotations
 
+import threading
 import time
-from datetime import date, datetime
+from datetime import date
 from typing import Any, Iterator
 
 import requests
@@ -14,29 +15,45 @@ BASE_URL = "https://api.openaq.org/v3"
 PM25_PARAMETER_ID = 2
 PM10_PARAMETER_ID = 1
 
+# Global backoff: when any thread hits 429, all threads pause together
+_GLOBAL_BACKOFF = threading.Event()
+_GLOBAL_BACKOFF.set()  # set = "no backoff active, proceed"
+
 
 class OpenAQClient:
-    def __init__(self, api_key: str, requests_per_second: float = 5.0) -> None:
+    def __init__(self, api_key: str, requests_per_second: float = 3.0) -> None:
         self.session = requests.Session()
         self.session.headers.update({"X-API-Key": api_key})
         self._min_interval = 1.0 / requests_per_second
         self._last_call = 0.0
+        self._lock = threading.Lock()  # ensures only one thread calls at a time
 
     def _throttle(self) -> None:
-        elapsed = time.monotonic() - self._last_call
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_call = time.monotonic()
+        """Block until the minimum interval since last request has passed.
+        Lock is held for the full check+sleep+update to prevent races."""
+        with self._lock:
+            elapsed = time.monotonic() - self._last_call
+            if elapsed < self._min_interval:
+                time.sleep(self._min_interval - elapsed)
+            self._last_call = time.monotonic()
 
-    @retry(stop=stop_after_attempt(4), wait=wait_exponential(min=2, max=30))
+    @retry(stop=stop_after_attempt(5), wait=wait_exponential(min=5, max=60))
     def _get(self, path: str, params: dict | None = None) -> dict:
+        # Wait if another thread triggered a global backoff
+        _GLOBAL_BACKOFF.wait()
         self._throttle()
+
         url = f"{BASE_URL}/{path.lstrip('/')}"
         resp = self.session.get(url, params=params, timeout=30)
+
         if resp.status_code == 429:
-            logger.warning("Rate limited — backing off")
-            time.sleep(10)
-            resp.raise_for_status()
+            # Pause ALL threads for 30s before retrying
+            logger.warning("Rate limited — pausing all threads for 30s")
+            _GLOBAL_BACKOFF.clear()
+            time.sleep(30)
+            _GLOBAL_BACKOFF.set()
+            resp.raise_for_status()  # triggers tenacity retry
+
         resp.raise_for_status()
         return resp.json()
 
@@ -54,7 +71,6 @@ class OpenAQClient:
             yield from results
             meta = data.get("meta", {})
             found = meta.get("found", "0")
-            # found can be ">1000" string when very large
             total = int(found) if str(found).isdigit() else (page + 1) * params["limit"]
             if page * params["limit"] >= total:
                 break
@@ -74,11 +90,18 @@ class OpenAQClient:
         country_code: str | None = None,
         parameters_id: int = PM25_PARAMETER_ID,
         only_active: bool = True,
+        monitor_only: bool = True,
     ) -> list[dict]:
-        """Return all monitoring locations, optionally filtered by country."""
+        """Return monitoring locations, optionally filtered by country.
+
+        monitor_only=True restricts to government/reference monitors,
+        excluding low-cost sensors — reduces sensor count ~10x.
+        """
         params: dict[str, Any] = {"parameters_id": parameters_id, "limit": 1000}
         if country_code:
             params["iso"] = country_code
+        if monitor_only:
+            params["monitor"] = True
         locs = list(self._paginate("locations", params))
         if only_active:
             locs = [l for l in locs if l.get("datetimeLast")]

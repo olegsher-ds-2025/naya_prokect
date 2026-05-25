@@ -44,19 +44,30 @@ def _parse_dt(dt_field: dict | None) -> str | None:
     return (dt_field.get("utc") or "")[:10] or None
 
 
-def build_locations_df(client: OpenAQClient, country_codes: list[str] | None = None) -> pd.DataFrame:
+def build_locations_df(
+    client: OpenAQClient,
+    country_codes: list[str] | None = None,
+    monitor_only: bool = True,
+) -> pd.DataFrame:
     """
     Fetch all active monitoring locations globally (or for specified countries).
-    Returns a DataFrame with one row per (location, parameter).
+
+    monitor_only=True (default) restricts to government/reference monitors,
+    reducing sensor count from ~30k to ~3k for manageable API usage.
     """
     rows = []
     targets = country_codes or [None]  # None = global fetch
 
     for cc in targets:
         label = cc or "global"
-        logger.info(f"Fetching locations for {label}")
+        logger.info(f"Fetching locations for {label} (monitor_only={monitor_only})")
         for param_id in (PM25_PARAMETER_ID, PM10_PARAMETER_ID):
-            locs = client.get_locations(country_code=cc, parameters_id=param_id, only_active=True)
+            locs = client.get_locations(
+                country_code=cc,
+                parameters_id=param_id,
+                only_active=True,
+                monitor_only=monitor_only,
+            )
             for loc in locs:
                 sensor_id = _extract_sensor_id(loc, param_id)
                 if sensor_id is None:
@@ -116,20 +127,25 @@ def build_daily_df(
     locations_df: pd.DataFrame,
     date_from: date,
     date_to: date,
-    max_workers: int = 8,
+    max_workers: int | None = None,
 ) -> pd.DataFrame:
     """
     Fetch hourly measurements for all sensors and aggregate to daily averages.
-    Uses a thread pool for speed (API I/O bound).
+
+    max_workers defaults to 2 for full-load (wide date range) and 4 for
+    incremental runs, to stay within API rate limits.
     """
+    date_span_days = (date_to - date_from).days
+    if max_workers is None:
+        max_workers = 2 if date_span_days > 30 else 4
     sensors = locations_df[["sensor_id", "location_id", "location_name",
                               "country_code", "country_name", "locality",
                               "lat", "lon", "parameter"]].drop_duplicates("sensor_id")
 
-    all_frames: list[pd.DataFrame] = []
-
     logger.info(f"Fetching measurements for {len(sensors)} sensors "
                 f"({date_from} → {date_to}) with {max_workers} workers")
+
+    all_frames: list[pd.DataFrame] = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_to_row = {
@@ -223,14 +239,14 @@ def run_pipeline(
 
     client = OpenAQClient(api_key)
 
-    # 1. Locations
-    locations_df = build_locations_df(client, country_codes)
+    # 1. Locations (government/reference monitors only)
+    locations_df = build_locations_df(client, country_codes, monitor_only=True)
     locations_path = RAW_DIR / "openaq_locations.csv"
     locations_df.to_csv(locations_path, index=False)
     logger.success(f"Saved {len(locations_df)} locations → {locations_path}")
 
-    # 2. Daily measurements
-    daily_df = build_daily_df(client, locations_df, date_from, date_to, max_workers)
+    # 2. Daily measurements (workers auto-scaled by date range)
+    daily_df = build_daily_df(client, locations_df, date_from, date_to)
     if not daily_df.empty:
         daily_path = PROCESSED_DIR / "openaq_daily.csv"
         daily_df.to_csv(daily_path, index=False)
