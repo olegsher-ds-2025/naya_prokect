@@ -1,0 +1,20 @@
+# --- Kaggle pre-installed (available on Kaggle without installing) ---
+# numpy, pandas, scikit-learn, scipy, matplotlib, seaborn, plotly,
+# torch, transformers, datasets, tqdm, pillow, geopandas, requests
+
+# --- Project dependencies (install these locally) ---
+
+# Utilities
+python-dotenv>=1.0.1
+tenacity>=8.3.0       # retry logic for API calls
+loguru>=0.7.2
+
+# Data & visualization (install locally to match Kaggle environment)
+numpy>=1.26.0
+pandas>=2.2.0
+scipy>=1.13.0
+scikit-learn>=1.4.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
+plotly>=5.22.0
+requests>=2.31.0

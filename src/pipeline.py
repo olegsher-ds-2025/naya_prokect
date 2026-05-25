@@ -1,0 +1,248 @@
+"""
+OpenAQ ingestion pipeline.
+
+Produces two clean datasets:
+  data/raw/openaq_locations.csv      — station metadata (country, city, lat/lng, sensors)
+  data/processed/openaq_daily.csv    — daily PM2.5 / PM10 averages per location
+  data/processed/openaq_monthly.csv  — monthly aggregates per country (for health data join)
+"""
+
+from __future__ import annotations
+
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
+from pathlib import Path
+
+import pandas as pd
+from loguru import logger
+
+from src.openaq_client import OpenAQClient, PM10_PARAMETER_ID, PM25_PARAMETER_ID
+
+RAW_DIR = Path("data/raw")
+PROCESSED_DIR = Path("data/processed")
+RAW_DIR.mkdir(parents=True, exist_ok=True)
+PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+# Kaggle paths (override when running on Kaggle)
+KAGGLE_OUTPUT = Path(os.getenv("KAGGLE_OUTPUT", "data/output"))
+KAGGLE_OUTPUT.mkdir(parents=True, exist_ok=True)
+
+WHO_AQG_PM25 = 15.0   # µg/m³ — WHO 2021 guideline
+
+
+def _extract_sensor_id(location: dict, parameter_id: int) -> int | None:
+    for sensor in location.get("sensors", []):
+        if sensor.get("parameter", {}).get("id") == parameter_id:
+            return sensor["id"]
+    return None
+
+
+def _parse_dt(dt_field: dict | None) -> str | None:
+    if not dt_field:
+        return None
+    return (dt_field.get("utc") or "")[:10] or None
+
+
+def build_locations_df(client: OpenAQClient, country_codes: list[str] | None = None) -> pd.DataFrame:
+    """
+    Fetch all active monitoring locations globally (or for specified countries).
+    Returns a DataFrame with one row per (location, parameter).
+    """
+    rows = []
+    targets = country_codes or [None]  # None = global fetch
+
+    for cc in targets:
+        label = cc or "global"
+        logger.info(f"Fetching locations for {label}")
+        for param_id in (PM25_PARAMETER_ID, PM10_PARAMETER_ID):
+            locs = client.get_locations(country_code=cc, parameters_id=param_id, only_active=True)
+            for loc in locs:
+                sensor_id = _extract_sensor_id(loc, param_id)
+                if sensor_id is None:
+                    continue
+                coord = loc.get("coordinates") or {}
+                rows.append({
+                    "location_id":   loc["id"],
+                    "location_name": loc.get("name", ""),
+                    "country_code":  loc.get("country", {}).get("code", ""),
+                    "country_name":  loc.get("country", {}).get("name", ""),
+                    "locality":      loc.get("locality") or "",
+                    "lat":           coord.get("latitude"),
+                    "lon":           coord.get("longitude"),
+                    "is_monitor":    loc.get("isMonitor", False),
+                    "parameter_id":  param_id,
+                    "parameter":     "pm25" if param_id == PM25_PARAMETER_ID else "pm10",
+                    "sensor_id":     sensor_id,
+                    "date_first":    _parse_dt(loc.get("datetimeFirst")),
+                    "date_last":     _parse_dt(loc.get("datetimeLast")),
+                })
+
+    df = pd.DataFrame(rows).drop_duplicates(subset=["sensor_id"])
+    logger.info(f"Locations found: {len(df)}")
+    return df
+
+
+def _fetch_measurements_for_sensor(
+    client: OpenAQClient, sensor_id: int, date_from: date, date_to: date
+) -> list[dict]:
+    try:
+        return client.get_sensor_measurements(sensor_id, date_from, date_to)
+    except Exception as e:
+        logger.warning(f"Sensor {sensor_id} failed: {e}")
+        return []
+
+
+def _measurements_to_df(raw: list[dict], sensor_id: int) -> pd.DataFrame:
+    if not raw:
+        return pd.DataFrame()
+    rows = []
+    for m in raw:
+        dt_from = (m.get("period") or {}).get("datetimeFrom", {})
+        utc_str = (dt_from.get("utc") or "") if isinstance(dt_from, dict) else ""
+        if not utc_str:
+            continue
+        rows.append({
+            "sensor_id": sensor_id,
+            "datetime_utc": utc_str,
+            "date": utc_str[:10],
+            "value": m.get("value"),
+        })
+    return pd.DataFrame(rows)
+
+
+def build_daily_df(
+    client: OpenAQClient,
+    locations_df: pd.DataFrame,
+    date_from: date,
+    date_to: date,
+    max_workers: int = 8,
+) -> pd.DataFrame:
+    """
+    Fetch hourly measurements for all sensors and aggregate to daily averages.
+    Uses a thread pool for speed (API I/O bound).
+    """
+    sensors = locations_df[["sensor_id", "location_id", "location_name",
+                              "country_code", "country_name", "locality",
+                              "lat", "lon", "parameter"]].drop_duplicates("sensor_id")
+
+    all_frames: list[pd.DataFrame] = []
+
+    logger.info(f"Fetching measurements for {len(sensors)} sensors "
+                f"({date_from} → {date_to}) with {max_workers} workers")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_row = {
+            pool.submit(_fetch_measurements_for_sensor, client, row.sensor_id, date_from, date_to): row
+            for row in sensors.itertuples()
+        }
+        done = 0
+        total = len(future_to_row)
+        for future in as_completed(future_to_row):
+            row = future_to_row[future]
+            raw = future.result()
+            df = _measurements_to_df(raw, row.sensor_id)
+            if not df.empty:
+                df["location_id"]   = row.location_id
+                df["location_name"] = row.location_name
+                df["country_code"]  = row.country_code
+                df["country_name"]  = row.country_name
+                df["locality"]      = row.locality
+                df["lat"]           = row.lat
+                df["lon"]           = row.lon
+                df["parameter"]     = row.parameter
+                all_frames.append(df)
+            done += 1
+            if done % 50 == 0:
+                logger.info(f"  {done}/{total} sensors processed")
+
+    if not all_frames:
+        logger.warning("No measurement data returned!")
+        return pd.DataFrame()
+
+    hourly = pd.concat(all_frames, ignore_index=True)
+    hourly["value"] = pd.to_numeric(hourly["value"], errors="coerce")
+    hourly = hourly[hourly["value"] >= 0]  # drop negative/invalid readings
+
+    # Aggregate to daily average per location + parameter
+    daily = (
+        hourly.groupby(
+            ["date", "location_id", "location_name", "country_code",
+             "country_name", "locality", "lat", "lon", "parameter"],
+            as_index=False,
+        )
+        .agg(value_mean=("value", "mean"), reading_count=("value", "count"))
+        .rename(columns={"value_mean": "value_ugm3"})
+    )
+    daily["value_ugm3"] = daily["value_ugm3"].round(2)
+    daily = daily.sort_values(["date", "country_code", "location_name"])
+    logger.info(f"Daily records: {len(daily)}")
+    return daily
+
+
+def build_monthly_country_df(daily_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate daily location data to monthly country-level averages."""
+    df = daily_df.copy()
+    df["year_month"] = df["date"].str[:7]  # YYYY-MM
+
+    monthly = (
+        df.groupby(["year_month", "country_code", "country_name", "parameter"], as_index=False)
+        .agg(
+            value_mean_ugm3=("value_ugm3", "mean"),
+            station_count=("location_id", "nunique"),
+            reading_count=("reading_count", "sum"),
+        )
+    )
+    monthly["value_mean_ugm3"] = monthly["value_mean_ugm3"].round(2)
+
+    # Flag countries exceeding WHO guideline (PM2.5)
+    pm25 = monthly["parameter"] == "pm25"
+    monthly.loc[pm25, "exceeds_who_guideline"] = (
+        monthly.loc[pm25, "value_mean_ugm3"] > WHO_AQG_PM25
+    )
+    monthly = monthly.sort_values(["year_month", "country_code"])
+    logger.info(f"Monthly country records: {len(monthly)}")
+    return monthly
+
+
+def run_pipeline(
+    api_key: str,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    country_codes: list[str] | None = None,
+    max_workers: int = 8,
+) -> dict[str, pd.DataFrame]:
+    """
+    Full Phase 1 pipeline.
+
+    Returns dict with keys: 'locations', 'daily', 'monthly'
+    and saves CSV files to data/raw/ and data/processed/.
+    """
+    date_to   = date_to   or date.today()
+    date_from = date_from or (date_to - timedelta(days=365))
+
+    client = OpenAQClient(api_key)
+
+    # 1. Locations
+    locations_df = build_locations_df(client, country_codes)
+    locations_path = RAW_DIR / "openaq_locations.csv"
+    locations_df.to_csv(locations_path, index=False)
+    logger.success(f"Saved {len(locations_df)} locations → {locations_path}")
+
+    # 2. Daily measurements
+    daily_df = build_daily_df(client, locations_df, date_from, date_to, max_workers)
+    if not daily_df.empty:
+        daily_path = PROCESSED_DIR / "openaq_daily.csv"
+        daily_df.to_csv(daily_path, index=False)
+        logger.success(f"Saved {len(daily_df)} daily records → {daily_path}")
+
+    # 3. Monthly country aggregation
+    if not daily_df.empty:
+        monthly_df = build_monthly_country_df(daily_df)
+        monthly_path = PROCESSED_DIR / "openaq_monthly.csv"
+        monthly_df.to_csv(monthly_path, index=False)
+        logger.success(f"Saved {len(monthly_df)} monthly records → {monthly_path}")
+    else:
+        monthly_df = pd.DataFrame()
+
+    return {"locations": locations_df, "daily": daily_df, "monthly": monthly_df}
