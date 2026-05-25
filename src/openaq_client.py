@@ -19,6 +19,9 @@ PM10_PARAMETER_ID = 1
 _GLOBAL_BACKOFF = threading.Event()
 _GLOBAL_BACKOFF.set()  # set = "no backoff active, proceed"
 
+# Set this to interrupt all sleeping worker threads (e.g. on KeyboardInterrupt)
+_SHUTDOWN_EVENT = threading.Event()
+
 
 class OpenAQClient:
     def __init__(self, api_key: str, requests_per_second: float = 3.0) -> None:
@@ -39,18 +42,24 @@ class OpenAQClient:
 
     @retry(stop=stop_after_attempt(5), wait=wait_exponential(min=5, max=60))
     def _get(self, path: str, params: dict | None = None) -> dict:
-        # Wait if another thread triggered a global backoff
-        _GLOBAL_BACKOFF.wait()
+        if _SHUTDOWN_EVENT.is_set():
+            raise InterruptedError("Shutdown requested")
+
+        # Wait if another thread triggered a global backoff (interruptible)
+        while not _GLOBAL_BACKOFF.wait(timeout=1.0):
+            if _SHUTDOWN_EVENT.is_set():
+                raise InterruptedError("Shutdown requested")
+
         self._throttle()
 
         url = f"{BASE_URL}/{path.lstrip('/')}"
         resp = self.session.get(url, params=params, timeout=30)
 
         if resp.status_code == 429:
-            # Pause ALL threads for 30s before retrying
-            logger.warning("Rate limited — pausing all threads for 30s")
+            # Pause ALL threads for 30s before retrying (interruptible)
+            logger.warning("Rate limited — backing off")
             _GLOBAL_BACKOFF.clear()
-            time.sleep(30)
+            _SHUTDOWN_EVENT.wait(timeout=30)  # wakes immediately if shutdown is signalled
             _GLOBAL_BACKOFF.set()
             resp.raise_for_status()  # triggers tenacity retry
 

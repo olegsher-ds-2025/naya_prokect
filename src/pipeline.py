@@ -17,7 +17,10 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 
-from src.openaq_client import OpenAQClient, PM10_PARAMETER_ID, PM25_PARAMETER_ID
+from src.openaq_client import (
+    OpenAQClient, PM10_PARAMETER_ID, PM25_PARAMETER_ID,
+    _GLOBAL_BACKOFF, _SHUTDOWN_EVENT,
+)
 
 RAW_DIR = Path("data/raw")
 PROCESSED_DIR = Path("data/processed")
@@ -146,17 +149,25 @@ def build_daily_df(
                 f"({date_from} → {date_to}) with {max_workers} workers")
 
     all_frames: list[pd.DataFrame] = []
+    _SHUTDOWN_EVENT.clear()  # ensure clean state before starting
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_to_row = {
-            pool.submit(_fetch_measurements_for_sensor, client, row.sensor_id, date_from, date_to): row
-            for row in sensors.itertuples()
-        }
-        done = 0
-        total = len(future_to_row)
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    future_to_row = {
+        pool.submit(_fetch_measurements_for_sensor, client, row.sensor_id, date_from, date_to): row
+        for row in sensors.itertuples()
+    }
+    done = 0
+    total = len(future_to_row)
+    try:
         for future in as_completed(future_to_row):
             row = future_to_row[future]
-            raw = future.result()
+            try:
+                raw = future.result()
+            except (InterruptedError, Exception) as exc:
+                if isinstance(exc, InterruptedError):
+                    raise KeyboardInterrupt from exc
+                logger.warning(f"Sensor {row.sensor_id} error: {exc}")
+                raw = []
             df = _measurements_to_df(raw, row.sensor_id)
             if not df.empty:
                 df["location_id"]   = row.location_id
@@ -171,6 +182,13 @@ def build_daily_df(
             done += 1
             if done % 50 == 0:
                 logger.info(f"  {done}/{total} sensors processed")
+    except KeyboardInterrupt:
+        logger.warning(f"Interrupted after {done}/{total} sensors — returning partial results")
+        _SHUTDOWN_EVENT.set()   # wake any threads sleeping in rate-limit backoff
+        _GLOBAL_BACKOFF.set()   # unblock threads waiting on the backoff gate
+        pool.shutdown(wait=False, cancel_futures=True)
+    else:
+        pool.shutdown(wait=False)
 
     if not all_frames:
         logger.warning("No measurement data returned!")
@@ -226,7 +244,7 @@ def run_pipeline(
     date_from: date | None = None,
     date_to: date | None = None,
     country_codes: list[str] | None = None,
-    max_workers: int = 8,
+    max_workers: int | None = None,
 ) -> dict[str, pd.DataFrame]:
     """
     Full Phase 1 pipeline.
