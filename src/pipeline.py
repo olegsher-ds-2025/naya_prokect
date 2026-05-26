@@ -36,7 +36,8 @@ WHO_AQG_PM25 = 15.0   # µg/m³ — WHO 2021 guideline
 # Top 10 cities ranked by absolute air-pollution-attributable mortality
 # Source: IHME Global Burden of Disease 2019 / WHO Ambient Air Quality Database
 # Format: (ISO-2 country code, locality keyword for OpenAQ substring match)
-TOP_MORTALITY_CITIES: list[tuple[str, str]] = [
+# Use None as keyword to include ALL sensors in a country (no locality filter).
+TOP_MORTALITY_CITIES: list[tuple[str, str | None]] = [
     ("IN", "Delhi"),
     ("CN", "Beijing"),
     ("BD", "Dhaka"),
@@ -50,14 +51,21 @@ TOP_MORTALITY_CITIES: list[tuple[str, str]] = [
 ]
 
 # US comparison cities — highest PM2.5 burden in the US (EPA / ALA State of the Air 2023)
-US_COMPARISON_CITIES: list[tuple[str, str]] = [
+US_COMPARISON_CITIES: list[tuple[str, str | None]] = [
     ("US", "Los Angeles"),
     ("US", "Fresno"),
     ("US", "Houston"),
 ]
 
+# Israel — all available sensors (small network, ~16 stations)
+ISRAEL_CITIES: list[tuple[str, str | None]] = [
+    ("IL", None),  # None = fetch every sensor in this country
+]
+
 # Combined: use this for the --top-mortality-cities flag
-PRIORITY_CITIES: list[tuple[str, str]] = TOP_MORTALITY_CITIES + US_COMPARISON_CITIES
+PRIORITY_CITIES: list[tuple[str, str | None]] = (
+    TOP_MORTALITY_CITIES + US_COMPARISON_CITIES + ISRAEL_CITIES
+)
 
 
 def _extract_sensor_id(location: dict, parameter_id: int) -> int | None:
@@ -108,13 +116,14 @@ def build_locations_df(
     if cities:
         unique_countries = list(dict.fromkeys(cc for cc, _ in cities))
         targets = unique_countries
-        city_keywords: dict[str, list[str]] = {}
+        city_keywords: dict[str, list] = {}
         for cc, kw in cities:
-            city_keywords.setdefault(cc, []).append(kw.lower())
+            # None keyword = country-wide (no locality filter); keep as None, don't lowercase
+            city_keywords.setdefault(cc, []).append(kw.lower() if kw is not None else None)
         logger.info(
-            f"City filter active — {len(cities)} cities across "
+            f"City filter active — {len(cities)} entries across "
             f"{len(unique_countries)} countries: "
-            + ", ".join(f"{kw}({cc})" for cc, kw in cities)
+            + ", ".join(f"{kw or 'ALL'}({cc})" for cc, kw in cities)
         )
     else:
         targets = country_codes or [None]  # None = global fetch
@@ -150,21 +159,25 @@ def build_locations_df(
                     f"{before_recency} → {len(locs)} after recency filter (>{min_date_last})"
                 )
 
-            # Post-filter to matching localities when city filter is active
+            # Post-filter to matching localities when city filter is active.
             # Check both `locality` and `name` — many countries (India, China, etc.)
             # leave locality=None but embed the city in the location name.
+            # A None keyword means "all sensors in this country" — skip filtering.
             if cc and cc in city_keywords:
                 keywords = city_keywords[cc]
-                before = len(locs)
-                locs = [
-                    loc for loc in locs
-                    if any(
-                        kw in (loc.get("locality") or "").lower()
-                        or kw in (loc.get("name") or "").lower()
-                        for kw in keywords
-                    )
-                ]
-                logger.info(f"  {cc}/{param_id}: {before} → {len(locs)} after city filter")
+                if None not in keywords:
+                    before = len(locs)
+                    locs = [
+                        loc for loc in locs
+                        if any(
+                            kw in (loc.get("locality") or "").lower()
+                            or kw in (loc.get("name") or "").lower()
+                            for kw in keywords
+                        )
+                    ]
+                    logger.info(f"  {cc}/{param_id}: {before} → {len(locs)} after city filter")
+                else:
+                    logger.info(f"  {cc}/{param_id}: {len(locs)} sensors (all included — country-wide)")
 
             for loc in locs:
                 sensor_id = _extract_sensor_id(loc, param_id)
@@ -448,17 +461,19 @@ if __name__ == "__main__":
         raise SystemExit("ERROR: OPENAQ_API_KEY not set in environment / .env file")
 
     # Resolve city filter
-    cities: list[tuple[str, str]] | None = None
+    cities: list[tuple[str, str | None]] | None = None
     if args.top_mortality_cities:
         cities = PRIORITY_CITIES
     elif args.city:
         try:
-            cities = [
-                (pair.split(":")[0].upper(), pair.split(":")[1])
-                for pair in args.city
-            ]
+            cities = []
+            for pair in args.city:
+                parts = pair.split(":", 1)
+                cc = parts[0].upper()
+                kw = parts[1] if len(parts) > 1 else None  # no colon → country-wide
+                cities.append((cc, kw))
         except (IndexError, ValueError):
-            raise SystemExit("ERROR: --city values must be in ISO2:locality format, e.g. IN:Delhi")
+            raise SystemExit("ERROR: --city values must be ISO2 or ISO2:locality, e.g. IL or IN:Delhi")
 
     run_pipeline(
         api_key=api_key,
