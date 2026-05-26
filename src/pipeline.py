@@ -62,9 +62,55 @@ ISRAEL_CITIES: list[tuple[str, str | None]] = [
     ("IL", None),  # None = fetch every sensor in this country
 ]
 
+# World capitals with confirmed OpenAQ PM2.5 sensors (probed 2026-05-26)
+# Excludes capitals already in TOP_MORTALITY_CITIES (Delhi, Beijing, Dhaka,
+# Karachi/Lahore, Cairo, Jakarta) and cities with zero sensors
+# (Tehran, Moscow, Brasília, Tokyo, Nursultan).
+WORLD_CAPITALS: list[tuple[str, str | None]] = [
+    # South / Southeast Asia
+    ("NP", "Kathmandu"),    # 4 sensors
+    ("LK", "Colombo"),      # 2 sensors
+    ("TH", "Bangkok"),      # 102 sensors
+    ("VN", "Hanoi"),        # 40 sensors
+    ("PH", "Manila"),       # 3 sensors
+    ("MY", "Kuala Lumpur"), # 1 sensor
+    ("SG", "Singapore"),    # 4 sensors
+    ("MM", "Yangon"),       # 1 sensor
+    # Central Asia
+    ("MN", "Ulaanbaatar"),  # 2 sensors — very high PM2.5
+    ("UZ", "Tashkent"),     # 1 sensor
+    ("KG", "Bishkek"),      # 3 sensors
+    # Middle East
+    ("IQ", "Baghdad"),      # 2 sensors
+    ("SA", "Riyadh"),       # 2 sensors
+    ("TR", "Ankara"),       # 16 sensors
+    # Africa
+    ("NG", "Abuja"),        # 6 sensors
+    ("ET", "Addis Ababa"),  # 4 sensors
+    ("KE", "Nairobi"),      # 8 sensors
+    ("GH", "Accra"),        # 4 sensors
+    ("SN", "Dakar"),        # 7 sensors
+    ("ZA", "Pretoria"),     # 1 sensor
+    # Europe
+    ("UA", "Kyiv"),         # 2 sensors
+    ("PL", "Warsaw"),       # 1 sensor
+    ("DE", "Berlin"),       # 20 sensors
+    ("FR", "Paris"),        # 9 sensors
+    ("GB", "London"),       # 24 sensors
+    # Americas
+    ("MX", "Mexico City"),  # 2 sensors
+    ("CO", "Bogota"),       # 2 sensors
+    ("PE", "Lima"),         # 13 sensors
+    ("CL", "Santiago"),     # 1 sensor
+    ("AR", "Buenos Aires"), # 7 sensors
+    # East Asia / Pacific
+    ("KR", "Seoul"),        # 2 sensors
+    ("TW", "Taipei"),       # 3 sensors
+]
+
 # Combined: use this for the --top-mortality-cities flag
 PRIORITY_CITIES: list[tuple[str, str | None]] = (
-    TOP_MORTALITY_CITIES + US_COMPARISON_CITIES + ISRAEL_CITIES
+    TOP_MORTALITY_CITIES + US_COMPARISON_CITIES + ISRAEL_CITIES + WORLD_CAPITALS
 )
 
 
