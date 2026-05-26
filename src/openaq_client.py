@@ -24,7 +24,7 @@ _SHUTDOWN_EVENT = threading.Event()
 
 
 class OpenAQClient:
-    def __init__(self, api_key: str, requests_per_second: float = 3.0) -> None:
+    def __init__(self, api_key: str, requests_per_second: float = 0.5) -> None:
         self.session = requests.Session()
         self.session.headers.update({"X-API-Key": api_key})
         self._min_interval = 1.0 / requests_per_second
@@ -40,7 +40,7 @@ class OpenAQClient:
                 time.sleep(self._min_interval - elapsed)
             self._last_call = time.monotonic()
 
-    @retry(stop=stop_after_attempt(5), wait=wait_exponential(min=5, max=60))
+    @retry(stop=stop_after_attempt(5), wait=wait_exponential(min=10, max=120))
     def _get(self, path: str, params: dict | None = None) -> dict:
         if _SHUTDOWN_EVENT.is_set():
             raise InterruptedError("Shutdown requested")
@@ -56,10 +56,11 @@ class OpenAQClient:
         resp = self.session.get(url, params=params, timeout=30)
 
         if resp.status_code == 429:
-            # Pause ALL threads for 30s before retrying (interruptible)
-            logger.warning("Rate limited — backing off")
+            # Honour the server's Retry-After header; fall back to 60s
+            retry_after = int(resp.headers.get("Retry-After", 60))
+            logger.warning(f"Rate limited — backing off {retry_after}s")
             _GLOBAL_BACKOFF.clear()
-            _SHUTDOWN_EVENT.wait(timeout=30)  # wakes immediately if shutdown is signalled
+            _SHUTDOWN_EVENT.wait(timeout=float(retry_after))
             _GLOBAL_BACKOFF.set()
             resp.raise_for_status()  # triggers tenacity retry
 
@@ -78,9 +79,13 @@ class OpenAQClient:
             if not results:
                 break
             yield from results
+            # Stop if this page was not full — no more pages exist.
+            # Also parse meta.found defensively (API may return ">1000" strings).
+            if len(results) < params["limit"]:
+                break
             meta = data.get("meta", {})
-            found = meta.get("found", "0")
-            total = int(found) if str(found).isdigit() else (page + 1) * params["limit"]
+            found_raw = str(meta.get("found", "0")).lstrip(">").strip()
+            total = int(found_raw) if found_raw.isdigit() else (page + 1) * params["limit"]
             if page * params["limit"] >= total:
                 break
             page += 1

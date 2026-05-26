@@ -33,6 +33,32 @@ KAGGLE_OUTPUT.mkdir(parents=True, exist_ok=True)
 
 WHO_AQG_PM25 = 15.0   # µg/m³ — WHO 2021 guideline
 
+# Top 10 cities ranked by absolute air-pollution-attributable mortality
+# Source: IHME Global Burden of Disease 2019 / WHO Ambient Air Quality Database
+# Format: (ISO-2 country code, locality keyword for OpenAQ substring match)
+TOP_MORTALITY_CITIES: list[tuple[str, str]] = [
+    ("IN", "Delhi"),
+    ("CN", "Beijing"),
+    ("BD", "Dhaka"),
+    ("PK", "Karachi"),
+    ("IN", "Mumbai"),
+    ("IN", "Kolkata"),
+    ("PK", "Lahore"),
+    ("EG", "Cairo"),
+    ("ID", "Jakarta"),
+    ("AF", "Kabul"),
+]
+
+# US comparison cities — highest PM2.5 burden in the US (EPA / ALA State of the Air 2023)
+US_COMPARISON_CITIES: list[tuple[str, str]] = [
+    ("US", "Los Angeles"),
+    ("US", "Fresno"),
+    ("US", "Houston"),
+]
+
+# Combined: use this for the --top-mortality-cities flag
+PRIORITY_CITIES: list[tuple[str, str]] = TOP_MORTALITY_CITIES + US_COMPARISON_CITIES
+
 
 def _extract_sensor_id(location: dict, parameter_id: int) -> int | None:
     for sensor in location.get("sensors", []):
@@ -50,16 +76,56 @@ def _parse_dt(dt_field: dict | None) -> str | None:
 def build_locations_df(
     client: OpenAQClient,
     country_codes: list[str] | None = None,
-    monitor_only: bool = True,
+    cities: list[tuple[str, str]] | None = None,
+    monitor_only: bool | None = None,
+    min_date_last: date | None = None,
 ) -> pd.DataFrame:
     """
-    Fetch all active monitoring locations globally (or for specified countries).
+    Fetch all active monitoring locations globally (or for specified countries/cities).
 
-    monitor_only=True (default) restricts to government/reference monitors,
-    reducing sensor count from ~30k to ~3k for manageable API usage.
+    Args:
+        country_codes:  ISO-2 country codes to fetch (e.g. ["US", "IN"]).
+                        None = global fetch.
+        cities:         List of (ISO-2, locality_keyword) pairs to restrict to specific
+                        cities, e.g. [("IN", "Delhi"), ("CN", "Beijing")].
+                        Fetches per country then post-filters by locality substring.
+                        Overrides country_codes when provided.
+        monitor_only:   Restrict to government/reference monitors.
+                        Defaults to True for global/country mode, False for city mode
+                        (developing-world cities rarely have reference-grade monitors).
+        min_date_last:  Drop sensors whose last report is before this date.
+                        Defaults to 18 months ago so stale sensors are excluded.
     """
+    # Auto-resolve monitor_only based on mode
+    if monitor_only is None:
+        monitor_only = cities is None  # False for city mode, True for global/country
+
+    # Default recency cutoff: sensors must have reported in the last 18 months
+    if min_date_last is None:
+        min_date_last = date.today() - timedelta(days=548)
+
+    # Build fetch targets: derive country list from cities if provided
+    if cities:
+        unique_countries = list(dict.fromkeys(cc for cc, _ in cities))
+        targets = unique_countries
+        city_keywords: dict[str, list[str]] = {}
+        for cc, kw in cities:
+            city_keywords.setdefault(cc, []).append(kw.lower())
+        logger.info(
+            f"City filter active — {len(cities)} cities across "
+            f"{len(unique_countries)} countries: "
+            + ", ".join(f"{kw}({cc})" for cc, kw in cities)
+        )
+    else:
+        targets = country_codes or [None]  # None = global fetch
+        city_keywords = {}
+
+    logger.info(
+        f"monitor_only={monitor_only}  |  "
+        f"min_date_last={min_date_last} (sensors inactive before this are skipped)"
+    )
+
     rows = []
-    targets = country_codes or [None]  # None = global fetch
 
     for cc in targets:
         label = cc or "global"
@@ -71,6 +137,35 @@ def build_locations_df(
                 only_active=True,
                 monitor_only=monitor_only,
             )
+
+            # Drop sensors that haven't reported since min_date_last
+            before_recency = len(locs)
+            locs = [
+                loc for loc in locs
+                if (_parse_dt(loc.get("datetimeLast")) or "0000-00-00") >= str(min_date_last)
+            ]
+            if before_recency != len(locs):
+                logger.info(
+                    f"  {cc or 'global'}/{param_id}: "
+                    f"{before_recency} → {len(locs)} after recency filter (>{min_date_last})"
+                )
+
+            # Post-filter to matching localities when city filter is active
+            # Check both `locality` and `name` — many countries (India, China, etc.)
+            # leave locality=None but embed the city in the location name.
+            if cc and cc in city_keywords:
+                keywords = city_keywords[cc]
+                before = len(locs)
+                locs = [
+                    loc for loc in locs
+                    if any(
+                        kw in (loc.get("locality") or "").lower()
+                        or kw in (loc.get("name") or "").lower()
+                        for kw in keywords
+                    )
+                ]
+                logger.info(f"  {cc}/{param_id}: {before} → {len(locs)} after city filter")
+
             for loc in locs:
                 sensor_id = _extract_sensor_id(loc, param_id)
                 if sensor_id is None:
@@ -94,6 +189,11 @@ def build_locations_df(
 
     df = pd.DataFrame(rows).drop_duplicates(subset=["sensor_id"])
     logger.info(f"Locations found: {len(df)}")
+    if df.empty:
+        logger.warning(
+            "No locations found! Possible causes: all sensors stale, "
+            "locality names don't match OpenAQ data, or no sensors for these countries."
+        )
     return df
 
 
@@ -244,6 +344,8 @@ def run_pipeline(
     date_from: date | None = None,
     date_to: date | None = None,
     country_codes: list[str] | None = None,
+    cities: list[tuple[str, str]] | None = None,
+    monitor_only: bool | None = None,
     max_workers: int | None = None,
 ) -> dict[str, pd.DataFrame]:
     """
@@ -251,14 +353,23 @@ def run_pipeline(
 
     Returns dict with keys: 'locations', 'daily', 'monthly'
     and saves CSV files to data/raw/ and data/processed/.
+
+    Args:
+        cities:       List of (ISO-2, locality_keyword) pairs, e.g. TOP_MORTALITY_CITIES.
+                      When set, overrides country_codes and restricts to matching cities.
+        monitor_only: None = auto (True for global/country, False for city mode).
     """
     date_to   = date_to   or date.today()
     date_from = date_from or (date_to - timedelta(days=365))
 
     client = OpenAQClient(api_key)
 
-    # 1. Locations (government/reference monitors only)
-    locations_df = build_locations_df(client, country_codes, monitor_only=True)
+    # 1. Locations — monitor_only auto-resolves; sensors inactive before date_from excluded
+    locations_df = build_locations_df(
+        client, country_codes, cities=cities,
+        monitor_only=monitor_only,
+        min_date_last=date_from,
+    )
     locations_path = RAW_DIR / "openaq_locations.csv"
     locations_df.to_csv(locations_path, index=False)
     logger.success(f"Saved {len(locations_df)} locations → {locations_path}")
@@ -280,3 +391,81 @@ def run_pipeline(
         monthly_df = pd.DataFrame()
 
     return {"locations": locations_df, "daily": daily_df, "monthly": monthly_df}
+
+
+if __name__ == "__main__":
+    import argparse
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    parser = argparse.ArgumentParser(description="OpenAQ ingestion pipeline")
+    parser.add_argument(
+        "--country",
+        nargs="+",
+        metavar="ISO2",
+        default=None,
+        help="ISO-2 country code(s) to filter (e.g. US, IN, DE). Omit for global fetch.",
+    )
+    parser.add_argument(
+        "--top-mortality-cities",
+        action="store_true",
+        help=(
+            "Download sensors for the top 10 highest-mortality cities (IHME GBD 2019) "
+            "+ 3 US comparison cities (Los Angeles, Fresno, Houston). "
+            "Overrides --country."
+        ),
+    )
+    parser.add_argument(
+        "--city",
+        nargs="+",
+        metavar="ISO2:LOCALITY",
+        default=None,
+        help=(
+            "Custom city filter as ISO2:locality pairs, "
+            "e.g. --city IN:Delhi CN:Beijing"
+        ),
+    )
+    parser.add_argument("--date-from", metavar="YYYY-MM-DD", default=None)
+    parser.add_argument("--date-to",   metavar="YYYY-MM-DD", default=None)
+    parser.add_argument(
+        "--max-workers", type=int, default=None,
+        help="Parallel download threads (default: auto-scaled by date range)",
+    )
+    parser.add_argument(
+        "--monitor-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Force monitor_only on/off. Default: auto (True for global/country, "
+            "False for city mode — needed for developing-world cities)."
+        ),
+    )
+    args = parser.parse_args()
+
+    api_key = os.environ.get("OPENAQ_API_KEY", "")
+    if not api_key:
+        raise SystemExit("ERROR: OPENAQ_API_KEY not set in environment / .env file")
+
+    # Resolve city filter
+    cities: list[tuple[str, str]] | None = None
+    if args.top_mortality_cities:
+        cities = PRIORITY_CITIES
+    elif args.city:
+        try:
+            cities = [
+                (pair.split(":")[0].upper(), pair.split(":")[1])
+                for pair in args.city
+            ]
+        except (IndexError, ValueError):
+            raise SystemExit("ERROR: --city values must be in ISO2:locality format, e.g. IN:Delhi")
+
+    run_pipeline(
+        api_key=api_key,
+        date_from=date.fromisoformat(args.date_from) if args.date_from else None,
+        date_to=date.fromisoformat(args.date_to)     if args.date_to   else None,
+        country_codes=args.country if not cities else None,
+        cities=cities,
+        monitor_only=args.monitor_only,
+        max_workers=args.max_workers,
+    )
