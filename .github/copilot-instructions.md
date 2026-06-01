@@ -33,9 +33,6 @@ Locally, map these to `./data/input/` and `./data/output/`.
 ## Architecture
 
 ```
-src/
-  openaq_client.py   # OpenAQ v3 API client (throttled, paginated, retry)
-  pipeline.py        # Phase 1 ingestion → locations + daily + monthly CSVs
 data/
   raw/               # Original source files, never modified (git-ignored)
   processed/         # Merged, normalized datasets ready for analysis
@@ -44,7 +41,7 @@ data/
 
 Notebooks are authored and run **directly on Kaggle** — not stored locally.
 
-**Key data flow:** OpenAQ API + WHO/IHME/World Bank CSVs → normalize to ISO-3 + YYYY-MM-DD → merge on (country, year) → engineer risk scores → Plotly visualizations → Kaggle dataset versions.
+**Key data flow:** Static OpenAQ CSVs + WHO/IHME/World Bank CSVs → normalize to ISO-3 + YYYY-MM-DD → merge on (country, year) → engineer risk scores → Plotly visualizations → Kaggle dataset versions.
 
 ## Key Conventions
 
@@ -58,7 +55,6 @@ Notebooks are authored and run **directly on Kaggle** — not stored locally.
 
 | Task | Command |
 |------|---------|
-| Run ingestion | `python -m src.pipeline` |
 | Run all tests | `pytest` |
 | Run a single test | `pytest tests/test_foo.py::test_bar_name` |
 | Lint | `ruff check .` |
