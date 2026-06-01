@@ -20,10 +20,19 @@ pytest
 ## Architecture
 
 ```
+scripts/
+  download_phase2_data.py      # Downloads WHO GHO, World Bank, IHME, Open-Meteo
+
 data/                 # All git-ignored (*.csv in .gitignore)
-  raw/openaq_locations.csv     # Station metadata (static, pre-collected)
-  processed/openaq_daily.csv   # Daily PM2.5/PM10 per station (static)
-  processed/openaq_monthly.csv # Monthly country-level aggregates (static)
+  raw/
+    openaq_locations.csv       # Station metadata (static, pre-collected)
+    who_gho_air_pollution.csv  # WHO GHO: PM2.5 mortality indicators (54k rows)
+    world_bank_indicators.csv  # World Bank: GDP, population, life expectancy (2.7k rows)
+    ihme_gbd_air_pollution.csv # IHME GBD via OWID: death rates & shares (7.4k rows)
+    open_meteo_weather.csv     # ERA5 daily weather for PRIORITY_CITIES 2020-2024 (54k rows)
+  processed/
+    openaq_daily.csv           # Daily PM2.5/PM10 per station (static)
+    openaq_monthly.csv         # Monthly country-level aggregates (static)
   output/                      # Kaggle export path
 ```
 
