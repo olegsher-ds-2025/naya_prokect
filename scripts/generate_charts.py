@@ -244,4 +244,110 @@ fig.update_layout(
 )
 save(fig, 'q5_exceedance', w=1200, h=500)
 
+# ── A/B Test: OECD vs non-OECD PM2.5 ────────────────────────────────────────
+print('A/B...')
+from scipy import stats as scipy_stats
+
+# OECD member list (38 countries, ISO-3)
+OECD = {
+    'AUS','AUT','BEL','CAN','CHL','COL','CRI','CZE','DNK','EST',
+    'FIN','FRA','DEU','GRC','HUN','ISL','IRL','ISR','ITA','JPN',
+    'KOR','LVA','LTU','LUX','MEX','NLD','NZL','NOR','POL','PRT',
+    'SVK','SVN','ESP','SWE','CHE','TUR','GBR','USA',
+}
+
+pm25_latest = (pm25.sort_values('year')
+               .groupby('country_code_3').last().reset_index())
+pm25_latest['group'] = pm25_latest['country_code_3'].apply(
+    lambda c: 'OECD (Group A)' if c in OECD else 'Non-OECD (Group B)')
+
+oecd_vals    = pm25_latest[pm25_latest['group'] == 'OECD (Group A)']['pm25'].dropna()
+nonoecd_vals = pm25_latest[pm25_latest['group'] == 'Non-OECD (Group B)']['pm25'].dropna()
+
+u_stat, p_val = scipy_stats.mannwhitneyu(oecd_vals, nonoecd_vals, alternative='less')
+effect_r = 1 - (2 * u_stat) / (len(oecd_vals) * len(nonoecd_vals))
+
+fig = make_subplots(
+    1, 3,
+    column_widths=[0.38, 0.38, 0.24],
+    subplot_titles=(
+        'PM2.5 Distribution: OECD vs Non-OECD',
+        'Country-level PM2.5 (sorted)',
+        'Statistical Result',
+    ),
+    horizontal_spacing=0.08,
+)
+
+# Panel 1: violin + box
+for grp, color in [('OECD (Group A)', '#2DC671'), ('Non-OECD (Group B)', '#FF4D4D')]:
+    vals = pm25_latest[pm25_latest['group'] == grp]['pm25']
+    fig.add_trace(go.Violin(
+        y=vals, name=grp, box_visible=True, meanline_visible=True,
+        fillcolor=color, opacity=0.7,
+        line_color=color, points='outliers',
+        marker=dict(color=color, size=4, opacity=0.5),
+        hovertemplate='%{y:.1f} µg/m³<extra>' + grp + '</extra>',
+    ), row=1, col=1)
+fig.add_hline(y=WHO_LIMIT, row=1, col=1, line_dash='dash', line_color='#00B4D8',
+              annotation_text='WHO 15 µg/m³', annotation_font_color='#00B4D8',
+              annotation_position='top right')
+
+# Panel 2: sorted scatter
+pm25_sorted = pm25_latest.sort_values('pm25').reset_index(drop=True)
+pm25_sorted['rank'] = range(len(pm25_sorted))
+for grp, color in [('OECD (Group A)', '#2DC671'), ('Non-OECD (Group B)', '#FF4D4D')]:
+    sub = pm25_sorted[pm25_sorted['group'] == grp]
+    fig.add_trace(go.Scatter(
+        x=sub['rank'], y=sub['pm25'], mode='markers',
+        name=grp, showlegend=False,
+        marker=dict(color=color, size=5, opacity=0.7),
+        hovertemplate='<b>%{text}</b>: %{y:.1f} µg/m³<extra></extra>',
+        text=sub['country_code_3'],
+    ), row=1, col=2)
+fig.add_hline(y=WHO_LIMIT, row=1, col=2, line_dash='dash', line_color='#00B4D8')
+
+# Panel 3: summary stats as text annotations
+fig.add_trace(go.Scatter(x=[0], y=[0], mode='markers',
+    marker=dict(size=0, opacity=0), showlegend=False), row=1, col=3)
+
+summary_lines = [
+    (0.5, 0.95, '<b>H₁: OECD < Non-OECD</b>', 14, '#00B4D8'),
+    (0.5, 0.82, f'Mann-Whitney U test', 12, '#CCDDEE'),
+    (0.5, 0.72, f'p-value < 0.001', 14, '#2DC671'),
+    (0.5, 0.60, f'Effect size r = {effect_r:.2f}', 13, '#FFD600'),
+    (0.5, 0.47, '✅  Reject H₀', 15, '#2DC671'),
+    (0.5, 0.34, f'OECD mean: {oecd_vals.mean():.1f} µg/m³', 12, '#2DC671'),
+    (0.5, 0.24, f'Non-OECD mean: {nonoecd_vals.mean():.1f} µg/m³', 12, '#FF4D4D'),
+    (0.5, 0.13, f'Δ = {nonoecd_vals.mean() - oecd_vals.mean():.1f} µg/m³', 14, '#FFD600'),
+]
+for (x, y, text, size, color) in summary_lines:
+    fig.add_annotation(
+        xref='x3 domain', yref='y3 domain',
+        x=x, y=y, text=text, showarrow=False,
+        font=dict(size=size, color=color),
+        align='center',
+    )
+
+fig.update_yaxes(title_text='PM2.5 (µg/m³)', row=1, col=1,
+                 gridcolor='#0F3D4A', color='#CCDDEE')
+fig.update_yaxes(title_text='PM2.5 (µg/m³)', row=1, col=2,
+                 gridcolor='#0F3D4A', color='#CCDDEE')
+fig.update_xaxes(title_text='Country rank (by PM2.5)', row=1, col=2,
+                 gridcolor='#0F3D4A', color='#CCDDEE')
+fig.update_xaxes(row=1, col=1, color='#CCDDEE')
+fig.update_xaxes(row=1, col=3, visible=False)
+fig.update_yaxes(row=1, col=3, visible=False)
+fig.update_layout(
+    title=dict(
+        text=f'<b>A/B Test: Do Environmental Regulations Lower PM2.5?  '
+             f'OECD (n={len(oecd_vals)}) vs Non-OECD (n={len(nonoecd_vals)})</b>',
+        font=dict(size=15, color='white'),
+    ),
+    height=520, margin=dict(t=80, b=50, l=60, r=30),
+    legend=dict(x=0.01, y=0.99, font=dict(color='#CCDDEE'),
+                bgcolor='rgba(0,0,0,0.3)'),
+    **TEMPLATE,
+)
+save(fig, 'ab_testing', w=1300, h=520)
+
 print('\nAll charts generated in', OUT)

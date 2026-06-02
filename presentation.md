@@ -265,6 +265,8 @@ Full merged dataset (WHO + IHME + OpenAQ + World Bank) — open for public resea
 **H₀:** OECD countries have the same PM2.5 levels as non-OECD countries  
 **H₁:** OECD countries have *significantly lower* PM2.5 — regulations have measurable impact
 
+![A/B Testing Chart](notebooks/charts/ab_testing.png)
+
 ### Group Comparison
 
 | | Group A — OECD (38 countries) | Group B — Non-OECD (145+ countries) |
