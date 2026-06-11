@@ -31,13 +31,16 @@
 
 **Q2 — Is it global?** **97.8%** of 227 countries exceed the WHO guideline in 2023. The most exposed (Qatar, Nigeria, Egypt, Cameroon) run **10–12×** over.
 
+**Global picture (green → red).** Top map = measured PM2.5 concentration (2023); bottom = air-pollution death rate (~2015). They don't fully overlap: the Gulf and Sahel are dirtiest by concentration, while Eastern Europe and East Asia carry the highest death *rates* (older populations, disease mix).
+![](img/c6_worldmap.png)
+
 **Q3 — Improving?** China **−47%** (2010→2023), Israel −30%, Pakistan −32%, India −26%. But South Asia stays ~43 µg/m³, and the US edged **+6%** (wildfire smoke).
 ![](img/c2_trend.png)
 
 **Q4 — Dirtier air → bigger toll?** Correlation of PM2.5 with the *share* of deaths from outdoor AP is weak (**r = 0.27**, n=179) — because in rich countries other causes dominate the death mix. Absolute burden is the honest metric.
 ![](img/c3_scatter.png)
 
-**Q5 — Where is the human cost highest?** Death rates: Bulgaria 211, China 202, DPRK 196 per 100k (~2015). Absolute deaths: **China 1.11 M, India 1.09 M** per year from ambient PM2.5.
+**Q5 — Where is the human cost highest?** Death rates: Bulgaria 211, China 202, North Korea 196 per 100k (~2015). Absolute deaths: **China 1.11 M, India 1.09 M** per year from ambient PM2.5.
 ![](img/c4_deathrate.png)
 
 **Q6 — Economics.** GDP per capita vs PM2.5 (region level, 2019) is **strongly negative, r = −0.70** — the environmental-Kuznets pattern: wealth funds enforcement and cleaner energy.
